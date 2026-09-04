@@ -12,6 +12,26 @@ from dataset import *
 import gc
 import os
 
+def parse_intervals(interval_str: str) -> list[tuple[int, int]]:
+    """
+    Converts a string of intervals/numbers (e.g., '0-3, 4, 6-9') 
+    into a list of tuples [(0, 3), (4, 4), (6, 9)].
+    """
+    intervals = []
+    for part in interval_str.split(","):
+        part = part.strip()
+        if not part:
+            continue
+            
+        if "-" in part:
+            start, end = part.split("-")
+            intervals.append((int(start.strip()), int(end.strip())))
+        else:
+            val = int(part)
+            intervals.append((val, val))
+            
+    return intervals
+
 parser = argparse.ArgumentParser(description="Vehicle Make, Model, Type VLM Training & Evaluation")
 parser.add_argument("--fold", type=str, required=True, default="0-9", help="Fold index (0-9)")
 parser.add_argument("--model", type=str, default="arnir0/Tiny-LLM", help="Hugging Face model ID or local path")
@@ -75,8 +95,8 @@ for md_idx, md in enumerate(model_classes):
 tokenizer = AutoTokenizer.from_pretrained(args.model)
 tokenizer.pad_token = tokenizer.eos_token
 
-def get_dataloader(split_name, is_train=True):
-    split_txt_path = Path(args.splits_dir) / f"{args.fold}" / f"{split_name}.txt"
+def get_dataloader(fold, split_name, is_train=True):
+    split_txt_path = Path(args.splits_dir) / f"{fold}" / f"{split_name}.txt"
     if not split_txt_path.exists():
         split_txt_path = Path(args.splits_dir) / f"{split_name}.txt"
 
@@ -128,25 +148,6 @@ def get_dataloader(split_name, is_train=True):
         collate_fn=collate_fn
     )
     return loader, len(image_to_node_map)
-
-train_loader, num_train_nodes = get_dataloader("train", is_train=True)
-val_loader, _ = get_dataloader("val", is_train=False)
-test_loader, _ = get_dataloader("test", is_train=False)
-
-edge_index = torch.stack([
-    torch.arange(num_train_nodes, dtype=torch.long),
-    torch.arange(num_train_nodes, dtype=torch.long)
-], dim=0).to(args.device)
-
-model = TinyMultimodalGNNViTLLM(
-    num_nodes=num_train_nodes, 
-    vocab=vocab,
-    embedding_dim=64, 
-    llm_model_id=args.model
-).to(args.device)
-
-for param in model.llm.parameters():
-    param.requires_grad = False
 
 def run_inference_and_collect(model, dataloader, edge_index, device, split_name="test"):
     model.eval()
@@ -208,110 +209,124 @@ def run_inference_and_collect(model, dataloader, edge_index, device, split_name=
 output_path = Path(args.output_dir)
 output_path.mkdir(parents=True, exist_ok=True)
 
-total_params = sum(p.numel() for p in model.parameters())
-trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+folds = parse_intervals(args.fold)
 
-print(f"Total parameters: {total_params:,}")
-print(f"Trainable parameters: {trainable_params:,}")
+for s, e in folds:
+    for fold in range(s, e+1):
+        train_loader, num_train_nodes = get_dataloader("train", is_train=True)
+        val_loader, _ = get_dataloader("val", is_train=False)
+        test_loader, _ = get_dataloader("test", is_train=False)
 
-print("\n--- Running Zero-Shot Evaluation on Validation Split ---")
-zeroshot_val_res = run_inference_and_collect(model, test_loader, edge_index, args.device, split_name="zeroshot_val")
+        edge_index = torch.stack([
+            torch.arange(num_train_nodes, dtype=torch.long),
+            torch.arange(num_train_nodes, dtype=torch.long)
+        ], dim=0).to(args.device)
 
-npz_data = {}
-for task, metrics in zeroshot_val_res.items():
-    npz_data[f"zero_{task}_preds"] = np.array(metrics["preds"], dtype=object)
-    npz_data[f"zero_{task}_gts"] = np.array(metrics["gts"], dtype=object)
-    npz_data[f"zero_{task}_ids"] = np.array(metrics["ids"], dtype=object)
-    npz_data[f"zero_{task}_logits"] = np.array(metrics["logits"], dtype=object)
-npz_filepath = output_path / f"zero_fold_{args.fold}_results.npz"
-np.savez(npz_filepath, **npz_data)
+        model = TinyMultimodalGNNViTLLM(
+            num_nodes=num_train_nodes, 
+            vocab=vocab,
+            embedding_dim=64, 
+            llm_model_id=args.model
+        ).to(args.device)
 
-optimizer = optim.AdamW(
-    filter(lambda p: p.requires_grad, model.parameters()), 
-    lr=args.lr, 
-    weight_decay=0.01
-)
+        for param in model.llm.parameters():
+            param.requires_grad = False
 
-training_history = {"epoch": [], "train_loss": [], "learning_rate": []}
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-model.train()
-for epoch in range(args.epochs):
-    total_loss = 0.0
-    num_batches = 0
-    progress_bar = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{args.epochs}]")
-    
-    for batch_idx, batch in enumerate(progress_bar):
-        pixel_values = batch["pixel_values"].to(args.device)
-        input_ids = batch["input_ids"].to(args.device)
-        attention_mask = batch["attention_mask"].to(args.device)
-        node_indices = batch["node_indices"].to(args.device)
-        labels = batch["labels"].to(args.device)
-        tasks = batch["task"]
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
 
-        optimizer.zero_grad()
-        
-        loss, logits_dict = model(
-            edge_index=edge_index,
-            node_indices=node_indices,
-            pixel_values=pixel_values,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            tasks=tasks,
-            labels=labels
+        print("\n--- Running Zero-Shot Evaluation on Validation Split ---")
+        zeroshot_test_res = run_inference_and_collect(model, test_loader, edge_index, args.device, split_name="zeroshot_test")
+
+        optimizer = optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()), 
+            lr=args.lr, 
+            weight_decay=0.01
         )
-        
-        loss_fct = nn.CrossEntropyLoss()
-        pred_indices = {t: torch.argmax(logits_dict[t], dim=-1) for t in ["type", "make", "model"]}
-        
-        hierarchical_penalty = 0.0
-        for i, task_name in enumerate(tasks):
-            if task_name == "make":
-                mk_idx = pred_indices["make"][i]
-                t_idx = pred_indices["type"][i]
-                if not make_type_mask[mk_idx, t_idx]:
-                    hierarchical_penalty += 1.5
-            elif task_name == "model":
-                md_idx = pred_indices["model"][i]
-                mk_idx = pred_indices["make"][i]
-                if not model_make_mask[md_idx, mk_idx]:
-                    hierarchical_penalty += 2.0
-                    
-        loss = loss + (0.1 * hierarchical_penalty / len(tasks))
-        
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-        
-        total_loss += loss.item()
-        num_batches += 1
-        progress_bar.set_postfix(loss=f"{total_loss/num_batches:.4f}")
 
-    avg_loss = total_loss / num_batches
-    current_lr = optimizer.param_groups[0]['lr']
-    
-    training_history["epoch"].append(epoch + 1)
-    training_history["train_loss"].append(avg_loss)
-    training_history["learning_rate"].append(current_lr)
+        training_history = {"epoch": [], "train_loss": [], "learning_rate": []}
 
-history_file = output_path / f"fold_{args.fold}_training_history.json"
-with open(history_file, 'w') as f:
-    json.dump(training_history, f, indent=4)
-print(f"Training history saved to {history_file}")
+        model.train()
+        for epoch in range(args.epochs):
+            total_loss = 0.0
+            num_batches = 0
+            progress_bar = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{args.epochs}]")
+            
+            for batch_idx, batch in enumerate(progress_bar):
+                pixel_values = batch["pixel_values"].to(args.device)
+                input_ids = batch["input_ids"].to(args.device)
+                attention_mask = batch["attention_mask"].to(args.device)
+                node_indices = batch["node_indices"].to(args.device)
+                labels = batch["labels"].to(args.device)
+                tasks = batch["task"]
 
-print("\n--- Running Post-Training Evaluation ---")
-val_res = run_inference_and_collect(model, val_loader, edge_index, args.device, split_name="val")
-test_res = run_inference_and_collect(model, test_loader, edge_index, args.device, split_name="test")
+                optimizer.zero_grad()
+                
+                loss, logits_dict = model(
+                    edge_index=edge_index,
+                    node_indices=node_indices,
+                    pixel_values=pixel_values,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    tasks=tasks,
+                    labels=labels
+                )
+                
+                loss_fct = nn.CrossEntropyLoss()
+                pred_indices = {t: torch.argmax(logits_dict[t], dim=-1) for t in ["type", "make", "model"]}
+                
+                hierarchical_penalty = 0.0
+                for i, task_name in enumerate(tasks):
+                    if task_name == "make":
+                        mk_idx = pred_indices["make"][i]
+                        t_idx = pred_indices["type"][i]
+                        if not make_type_mask[mk_idx, t_idx]:
+                            hierarchical_penalty += 1.5
+                    elif task_name == "model":
+                        md_idx = pred_indices["model"][i]
+                        mk_idx = pred_indices["make"][i]
+                        if not model_make_mask[md_idx, mk_idx]:
+                            hierarchical_penalty += 2.0
+                            
+                loss = loss + (0.1 * hierarchical_penalty / len(tasks))
+                
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                
+                total_loss += loss.item()
+                num_batches += 1
+                progress_bar.set_postfix(loss=f"{total_loss/num_batches:.4f}")
 
-print("\nExporting all results to .npz...")
-npz_data = {}
+            avg_loss = total_loss / num_batches
+            current_lr = optimizer.param_groups[0]['lr']
+            
+            training_history["epoch"].append(epoch + 1)
+            training_history["train_loss"].append(avg_loss)
+            training_history["learning_rate"].append(current_lr)
 
-for split_prefix, res_dict in [("zero", zeroshot_val_res), ("val", val_res), ("test", test_res)]:
-    for task, metrics in res_dict.items():
-        npz_data[f"{split_prefix}_{task}_preds"] = np.array(metrics["preds"], dtype=object)
-        npz_data[f"{split_prefix}_{task}_gts"] = np.array(metrics["gts"], dtype=object)
-        npz_data[f"{split_prefix}_{task}_ids"] = np.array(metrics["ids"], dtype=object)
-        npz_data[f"{split_prefix}_{task}_logits"] = np.array(metrics["logits"], dtype=object)
+        history_file = output_path / f"fold_{args.fold}_training_history.json"
+        with open(history_file, 'w') as f:
+            json.dump(training_history, f, indent=4)
+        print(f"Training history saved to {history_file}")
 
-npz_filepath = output_path / f"fold_{args.fold}_results.npz"
-np.savez(npz_filepath, **npz_data)
-print(f"All split results saved to {npz_filepath}")
+        print("\n--- Running Post-Training Evaluation ---")
+        val_res = run_inference_and_collect(model, val_loader, edge_index, args.device, split_name="val")
+        test_res = run_inference_and_collect(model, test_loader, edge_index, args.device, split_name="test")
+
+        print("\nExporting all results to .npz...")
+        npz_data = {}
+
+        for split_prefix, res_dict in [("zero", zeroshot_test_res), ("val", val_res), ("test", test_res)]:
+            for task, metrics in res_dict.items():
+                npz_data[f"{split_prefix}_{task}_preds"] = np.array(metrics["preds"], dtype=object)
+                npz_data[f"{split_prefix}_{task}_gts"] = np.array(metrics["gts"], dtype=object)
+                npz_data[f"{split_prefix}_{task}_ids"] = np.array(metrics["ids"], dtype=object)
+                npz_data[f"{split_prefix}_{task}_logits"] = np.array(metrics["logits"], dtype=object)
+
+        npz_filepath = output_path / f"fold_{args.fold}_results.npz"
+        np.savez(npz_filepath, **npz_data)
+        print(f"All split results saved to {npz_filepath}")
