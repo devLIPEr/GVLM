@@ -213,9 +213,9 @@ folds = parse_intervals(args.fold)
 
 for s, e in folds:
     for fold in range(s, e+1):
-        train_loader, num_train_nodes = get_dataloader("train", is_train=True)
-        val_loader, _ = get_dataloader("val", is_train=False)
-        test_loader, _ = get_dataloader("test", is_train=False)
+        train_loader, num_train_nodes = get_dataloader(str(fold), "train", is_train=True)
+        val_loader, _ = get_dataloader(str(fold), "val", is_train=False)
+        test_loader, _ = get_dataloader(str(fold), "test", is_train=False)
 
         edge_index = torch.stack([
             torch.arange(num_train_nodes, dtype=torch.long),
