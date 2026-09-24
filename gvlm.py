@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM
-from torch_geometric.nn import LightGCN
+from torch_geometric.nn import LightGCN, GAT
 import timm
 
 def create_collate_fn(tokenizer):
@@ -28,10 +28,17 @@ def create_collate_fn(tokenizer):
     return collate_fn
 
 class TinyMultimodalGNNViTLLM(nn.Module):
-    def __init__(self, num_nodes, vocab, embedding_dim=64, llm_model_id="HuggingFaceTB/SmolLM-135M"):
+    def __init__(self, num_nodes, vocab, graph_encoder="LightGCN", embedding_dim=64, llm_model_id="HuggingFaceTB/SmolLM-135M"):
         super().__init__()
         
-        self.light_gnn = LightGCN(num_nodes=num_nodes, embedding_dim=embedding_dim, num_layers=2)
+        self.graph_encoder = graph_encoder
+        if graph_encoder == "GAT":
+            self.node_embedding = nn.Embedding(num_nodes, embedding_dim)
+
+            self.gnn = GAT(in_channels=embedding_dim, hidden_channels=embedding_dim, num_layers=2, out_channels=embedding_dim)
+        else:
+            self.gnn = LightGCN(num_nodes=num_nodes, embedding_dim=embedding_dim, num_layers=2)
+                
         self.vit = timm.create_model("vit_tiny_patch16_224", pretrained=True, num_classes=0)
         vit_out_dim = 192
         
@@ -57,7 +64,11 @@ class TinyMultimodalGNNViTLLM(nn.Module):
         })
 
     def forward(self, edge_index, node_indices, pixel_values, input_ids, attention_mask=None, tasks=None, labels=None):
-        all_embeddings = self.light_gnn.get_embedding(edge_index)
+        if self.graph_encoder == "GAT":
+            x = self.node_embedding.weight
+            self.gnn(x, edge_index)
+        else:
+            all_embeddings = self.gnn.get_embedding(edge_index)
         batch_gnn_feats = all_embeddings[node_indices].unsqueeze(1)
         
         vit_feats = self.vit.forward_features(pixel_values)

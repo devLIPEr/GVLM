@@ -45,6 +45,7 @@ parser.add_argument("--min_limit_size", type=int, default=-1, help="Limit starti
 parser.add_argument("--max_limit_size", type=int, default=-1, help="Limit ending point")
 parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
 parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate")
+parser.add_argument("--graph_encoder", type=str, choices=["LightGCN", "GAT"], default="LightGCN", help="Graph encoder (LightGCN, GAT)")
 
 args = parser.parse_args()
 
@@ -269,8 +270,6 @@ for s, e in folds:
 
         print(f"Total parameters: {total_params:,}")
         print(f"Trainable parameters: {trainable_params:,}")
-
-        exit(0)
 
         print("\n--- Running Zero-Shot Evaluation on Validation Split ---")
         zeroshot_test_res = run_inference_and_collect(model, test_loader, edge_index, args.device, split_name="zeroshot_test")
