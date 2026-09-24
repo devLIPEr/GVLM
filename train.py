@@ -211,19 +211,51 @@ output_path.mkdir(parents=True, exist_ok=True)
 
 folds = parse_intervals(args.fold)
 
+num_types = len(vocab["type"]["classes"])
+num_makes = len(vocab["make"]["classes"])
+num_models = len(vocab["model"]["classes"])
+
+make_offset = num_types
+model_offset = num_types + num_makes
+total_class_nodes = num_types + num_makes + num_models
+
+edges_u = []
+edges_v = []
+
+tuples_path = Path("../valid_tuples.txt")
+if tuples_path.exists():
+    with open(tuples_path, "r") as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) == 3:
+                t_idx, mk_idx, model_idx = map(int, parts)
+                
+                t_node = t_idx
+                mk_node = mk_idx + make_offset
+                model_node = model_idx + model_offset
+                
+                edges_u.extend([t_node, mk_node, mk_node, model_node])
+                edges_v.extend([mk_node, t_node, model_node, mk_node])
+
+for i in range(total_class_nodes):
+    edges_u.append(i)
+    edges_v.append(i)
+
+edge_index = torch.tensor([edges_u, edges_v], dtype=torch.long).to(args.device)
+
 for s, e in folds:
     for fold in range(s, e+1):
         train_loader, num_train_nodes = get_dataloader(str(fold), "train", is_train=True)
         val_loader, _ = get_dataloader(str(fold), "val", is_train=False)
         test_loader, _ = get_dataloader(str(fold), "test", is_train=False)
 
-        edge_index = torch.stack([
-            torch.arange(num_train_nodes, dtype=torch.long),
-            torch.arange(num_train_nodes, dtype=torch.long)
-        ], dim=0).to(args.device)
+        # edge_index = torch.stack([
+        #     torch.arange(num_train_nodes, dtype=torch.long),
+        #     torch.arange(num_train_nodes, dtype=torch.long)
+        # ], dim=0).to(args.device)
 
         model = TinyMultimodalGNNViTLLM(
-            num_nodes=num_train_nodes, 
+            num_nodes=total_class_nodes, 
             vocab=vocab,
             embedding_dim=64, 
             llm_model_id=args.model
@@ -237,6 +269,8 @@ for s, e in folds:
 
         print(f"Total parameters: {total_params:,}")
         print(f"Trainable parameters: {trainable_params:,}")
+
+        exit(0)
 
         print("\n--- Running Zero-Shot Evaluation on Validation Split ---")
         zeroshot_test_res = run_inference_and_collect(model, test_loader, edge_index, args.device, split_name="zeroshot_test")
@@ -308,7 +342,17 @@ for s, e in folds:
             training_history["train_loss"].append(avg_loss)
             training_history["learning_rate"].append(current_lr)
 
-        history_file = output_path / f"fold_{args.fold}_training_history.json"
+        model_save_path = output_path / f"fold_{fold}_model.pt"
+        torch.save({
+            'epoch': args.epochs,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'vocab': vocab,
+            'num_nodes': num_train_nodes
+        }, model_save_path)
+        print(f"Trained model checkpoint saved to {model_save_path}")
+
+        history_file = output_path / f"fold_{fold}_training_history.json"
         with open(history_file, 'w') as f:
             json.dump(training_history, f, indent=4)
         print(f"Training history saved to {history_file}")
@@ -327,6 +371,6 @@ for s, e in folds:
                 npz_data[f"{split_prefix}_{task}_ids"] = np.array(metrics["ids"], dtype=object)
                 npz_data[f"{split_prefix}_{task}_logits"] = np.array(metrics["logits"], dtype=object)
 
-        npz_filepath = output_path / f"fold_{args.fold}_results.npz"
+        npz_filepath = output_path / f"fold_{fold}_results.npz"
         np.savez(npz_filepath, **npz_data)
         print(f"All split results saved to {npz_filepath}")
